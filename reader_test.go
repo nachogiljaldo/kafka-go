@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -855,6 +856,12 @@ func TestReaderConsumerGroup(t *testing.T) {
 			partitions: 1,
 			function:   testConsumerGroupSimple,
 		},
+
+		{
+			scenario:   "Do not commit not assigned messages after rebalance",
+			partitions: 2,
+			function:   testReaderConsumerGroupRebalanceDoesNotCommitNotOwnedPartitions,
+		},
 	}
 
 	for _, test := range tests {
@@ -1171,6 +1178,76 @@ func testReaderConsumerGroupRebalanceAcrossManyPartitionsAndConsumers(t *testing
 
 	if _, err := r.FetchMessage(ctx); err != nil {
 		t.Errorf("expect to read from original reader")
+	}
+}
+
+func testReaderConsumerGroupRebalanceDoesNotCommitNotOwnedPartitions(t *testing.T, ctx context.Context, firstReader *Reader) {
+	client, shutdown := newLocalClient()
+	defer shutdown()
+
+	// write messages across both partitions
+	writer := &Writer{
+		Addr:      TCP(firstReader.config.Brokers...),
+		Topic:     firstReader.config.Topic,
+		Balancer:  &RoundRobin{},
+		BatchSize: 1,
+		Transport: client.Transport,
+	}
+	messageCount := 4
+	if err := writer.WriteMessages(ctx, makeTestSequence(messageCount)...); err != nil {
+		t.Fatalf("bad write messages: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("bad write err: %v", err)
+	}
+
+	secondReader := NewReader(firstReader.config)
+	defer secondReader.Close()
+
+	require.Eventually(t, func() bool {
+		resp, err := client.DescribeGroups(
+			ctx,
+			&DescribeGroupsRequest{
+				GroupIDs: []string{firstReader.config.GroupID},
+			},
+		)
+		assert.NoError(t, err)
+		assert.NotNil(t, resp)
+		return len(resp.Groups[0].Members) == 2
+	}, 10*time.Second, 100*time.Millisecond)
+
+	topicsToCommit := make(map[int]int64)
+	msgsForSecondReader := make([]Message, 0, messageCount)
+	for i := 0; i < messageCount/2; i++ {
+		if msg, err := secondReader.FetchMessage(ctx); err != nil {
+			t.Errorf("reader %v expected to read 1 message", i)
+		} else {
+			msgsForSecondReader = append(msgsForSecondReader, msg)
+			topicsToCommit[msg.Partition] = msg.Offset
+		}
+	}
+
+	require.NoError(t, secondReader.CommitMessages(ctx, msgsForSecondReader[len(msgsForSecondReader)-1]))
+	require.NoError(t, firstReader.CommitMessages(ctx, msgsForSecondReader[0]))
+	resp, err := client.OffsetFetch(
+		ctx,
+		&OffsetFetchRequest{
+			GroupID: firstReader.config.GroupID,
+			Topics:  map[string][]int{firstReader.config.Topic: {0, 1}},
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	if topics, ok := resp.Topics[firstReader.config.Topic]; !ok {
+		require.True(t, ok, "Topic not found")
+	} else {
+		for _, topic := range topics {
+			if offset, ok := topicsToCommit[topic.Partition]; ok {
+				assert.Equal(t, offset+1, topic.CommittedOffset, "committed partition %d had committed offset %d instead of %d", topic.Partition, topic.CommittedOffset, offset)
+			} else {
+				assert.Equal(t, int64(-1), topic.CommittedOffset, "not-committed partition %d had committed offset %d instead of 0", topic.Partition, topic.CommittedOffset)
+			}
+		}
 	}
 }
 
