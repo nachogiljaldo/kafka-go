@@ -34,6 +34,10 @@ const (
 var (
 	errOnlyAvailableWithGroup = errors.New("unavailable when GroupID is not set")
 	errNotAvailableWithGroup  = errors.New("unavailable when GroupID is set")
+
+	// ErrPartitionNotAssigned is returned when trying to commit offsets for partitions the
+	// current generation does not assign to this member.
+	ErrPartitionNotAssigned = errors.New("partition is not assigned to the current consumer")
 )
 
 const (
@@ -156,9 +160,39 @@ func (r *Reader) commitOffsetsWithRetry(gen *Generation, offsetStash offsetStash
 				return
 			}
 		}
-
-		if err = gen.CommitOffsets(offsetStash); err == nil {
+		err = nil
+		// The setting has to be enabled explicitly
+		if r.config.IgnoreCommitNotAssignedPartitions {
+			// for each topic in the provided offsets,
+			// we verify if the generation contains those topic / partitions
+			for topic, offsets := range offsetStash {
+				if assignments, ok := gen.Assignments[topic]; ok {
+					found := false
+					for partition, _ := range offsets {
+						for _, assignment := range assignments {
+							if assignment.ID == partition {
+								found = true
+								break
+							}
+						}
+						if !found {
+							delete(offsetStash[topic], partition)
+							if len(offsetStash) == 0 {
+								delete(offsetStash, topic)
+							}
+							err = ErrPartitionNotAssigned
+						}
+					}
+				} else {
+					delete(offsetStash, topic)
+					err = ErrPartitionNotAssigned
+				}
+			}
+		}
+		if commitErr := gen.CommitOffsets(offsetStash); commitErr == nil {
 			return
+		} else {
+			err = commitErr
 		}
 	}
 
@@ -431,6 +465,11 @@ type ReaderConfig struct {
 	//
 	// Only used when GroupID is set
 	CommitInterval time.Duration
+
+	// IgnoreCommitNotAssignedPartitions if set to true, when a commit is attempted to a partition
+	// not assigned to the current member, it will be ignored and an error returned.
+	// Remaining partitions will be commited as usual.
+	IgnoreCommitNotAssignedPartitions bool
 
 	// PartitionWatchInterval indicates how often a reader checks for partition changes.
 	// If a reader sees a partition change (such as a partition add) it will rebalance the group

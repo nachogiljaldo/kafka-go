@@ -792,10 +792,11 @@ func TestExtractTopics(t *testing.T) {
 
 func TestReaderConsumerGroup(t *testing.T) {
 	tests := []struct {
-		scenario       string
-		partitions     int
-		commitInterval time.Duration
-		function       func(*testing.T, context.Context, *Reader)
+		scenario                string
+		partitions              int
+		commitInterval          time.Duration
+		ignoreCommitNotAssigned bool
+		function                func(*testing.T, context.Context, *Reader)
 	}{
 		{
 			scenario:   "basic handshake",
@@ -858,9 +859,10 @@ func TestReaderConsumerGroup(t *testing.T) {
 		},
 
 		{
-			scenario:   "Do not commit not assigned messages after rebalance",
-			partitions: 2,
-			function:   testReaderConsumerGroupRebalanceDoesNotCommitNotOwnedPartitions,
+			scenario:                "Do not commit not assigned messages after rebalance",
+			partitions:              2,
+			function:                testReaderConsumerGroupRebalanceDoesNotCommitNotOwnedPartitions,
+			ignoreCommitNotAssigned: true,
 		},
 	}
 
@@ -877,15 +879,16 @@ func TestReaderConsumerGroup(t *testing.T) {
 
 			groupID := makeGroupID()
 			r := NewReader(ReaderConfig{
-				Brokers:           []string{"localhost:9092"},
-				Topic:             topic,
-				GroupID:           groupID,
-				HeartbeatInterval: 2 * time.Second,
-				CommitInterval:    test.commitInterval,
-				RebalanceTimeout:  2 * time.Second,
-				RetentionTime:     time.Hour,
-				MinBytes:          1,
-				MaxBytes:          1e6,
+				Brokers:                           []string{"localhost:9092"},
+				Topic:                             topic,
+				GroupID:                           groupID,
+				HeartbeatInterval:                 2 * time.Second,
+				CommitInterval:                    test.commitInterval,
+				RebalanceTimeout:                  2 * time.Second,
+				RetentionTime:                     time.Hour,
+				MinBytes:                          1,
+				MaxBytes:                          1e6,
+				IgnoreCommitNotAssignedPartitions: test.ignoreCommitNotAssigned,
 			})
 			defer r.Close()
 
@@ -1228,27 +1231,7 @@ func testReaderConsumerGroupRebalanceDoesNotCommitNotOwnedPartitions(t *testing.
 	}
 
 	require.NoError(t, secondReader.CommitMessages(ctx, msgsForSecondReader[len(msgsForSecondReader)-1]))
-	require.NoError(t, firstReader.CommitMessages(ctx, msgsForSecondReader[0]))
-	resp, err := client.OffsetFetch(
-		ctx,
-		&OffsetFetchRequest{
-			GroupID: firstReader.config.GroupID,
-			Topics:  map[string][]int{firstReader.config.Topic: {0, 1}},
-		},
-	)
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	if topics, ok := resp.Topics[firstReader.config.Topic]; !ok {
-		require.True(t, ok, "Topic not found")
-	} else {
-		for _, topic := range topics {
-			if offset, ok := topicsToCommit[topic.Partition]; ok {
-				assert.Equal(t, offset+1, topic.CommittedOffset, "committed partition %d had committed offset %d instead of %d", topic.Partition, topic.CommittedOffset, offset)
-			} else {
-				assert.Equal(t, int64(-1), topic.CommittedOffset, "not-committed partition %d had committed offset %d instead of 0", topic.Partition, topic.CommittedOffset)
-			}
-		}
-	}
+	require.ErrorIs(t, ErrPartitionNotAssigned, firstReader.CommitMessages(ctx, msgsForSecondReader[0]))
 }
 
 func TestOffsetStash(t *testing.T) {
@@ -1359,10 +1342,11 @@ func TestCommitLoopImmediateFlushOnGenerationEnd(t *testing.T) {
 				return offsetCommitResponseV2{}, nil
 			},
 		},
-		done:     make(chan struct{}),
-		log:      func(func(Logger)) {},
-		logError: func(func(Logger)) {},
-		joined:   make(chan struct{}),
+		done:        make(chan struct{}),
+		log:         func(func(Logger)) {},
+		logError:    func(func(Logger)) {},
+		joined:      make(chan struct{}),
+		Assignments: map[string][]PartitionAssignment{"topic": {{0, 1}}},
 	}
 
 	// initialize commits so that the commitLoopImmediate select statement blocks
@@ -1430,9 +1414,10 @@ func TestCommitOffsetsWithRetry(t *testing.T) {
 						return offsetCommitResponseV2{}, nil
 					},
 				},
-				done:     make(chan struct{}),
-				log:      func(func(Logger)) {},
-				logError: func(func(Logger)) {},
+				done:        make(chan struct{}),
+				log:         func(func(Logger)) {},
+				logError:    func(func(Logger)) {},
+				Assignments: map[string][]PartitionAssignment{"topic": {{0, 1}}},
 			}
 
 			r := &Reader{stctx: context.Background()}
@@ -1636,7 +1621,7 @@ func TestConsumerGroupWithGroupTopicsSingle(t *testing.T) {
 	}
 }
 
-func TestConsumerGroupWithGroupTopicsMultple(t *testing.T) {
+func TestConsumerGroupWithGroupTopicsMultiple(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
