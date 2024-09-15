@@ -156,7 +156,7 @@ func (r *Reader) commitOffsetsWithRetry(gen *Generation, offsetStash offsetStash
 		for partition, commitInfo := range partitionsInfo {
 			// if there is a generation and it is different than the current
 			// it means there was a rebalance
-			if commitInfo.generationId != -1 {
+			if commitInfo.generationId != undefinedGenerationId {
 				if gen.ID == commitInfo.generationId {
 					msgsForTopic[partition] = commitInfo.offset
 				} else {
@@ -855,7 +855,7 @@ func (r *Reader) FetchMessage(ctx context.Context) (Message, error) {
 		r.mutex.Lock()
 
 		if !r.closed && r.version == 0 {
-			r.start(-1, r.getTopicPartitionOffset())
+			r.start(undefinedGenerationId, r.getTopicPartitionOffset())
 		}
 
 		version := r.version
@@ -1076,7 +1076,7 @@ func (r *Reader) SetOffset(offset int64) error {
 		r.offset = offset
 
 		if r.version != 0 {
-			r.start(-1, r.getTopicPartitionOffset())
+			r.start(undefinedGenerationId, r.getTopicPartitionOffset())
 		}
 
 		r.activateReadLag()
