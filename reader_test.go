@@ -897,6 +897,36 @@ func TestReaderConsumerGroup(t *testing.T) {
 	}
 }
 
+func TestReaderConsumerGroup2(t *testing.T) {
+	// It appears that some of the tests depend on all these tests being
+	// run concurrently to pass... this is brittle and should be fixed
+	// at some point.
+	t.Parallel()
+
+	topic := makeTopic()
+	createTopic(t, topic, 2)
+	defer deleteTopic(t, topic)
+
+	groupID := makeGroupID()
+	r := NewReader(ReaderConfig{
+		Brokers:           []string{"localhost:9092"},
+		Topic:             topic,
+		GroupID:           groupID,
+		HeartbeatInterval: 2 * time.Second,
+		CommitInterval:    0,
+		RebalanceTimeout:  2 * time.Second,
+		RetentionTime:     time.Hour,
+		MinBytes:          1,
+		MaxBytes:          1e6,
+	})
+	defer r.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	testReaderConsumerGroupRebalanceDoesNotCommitNotOwnedPartitions(t, ctx, r)
+}
+
 func testReaderConsumerGroupHandshake(t *testing.T, ctx context.Context, r *Reader) {
 	prepareReader(t, context.Background(), r, makeTestSequence(5)...)
 
@@ -1228,27 +1258,7 @@ func testReaderConsumerGroupRebalanceDoesNotCommitNotOwnedPartitions(t *testing.
 	}
 
 	require.NoError(t, secondReader.CommitMessages(ctx, msgsForSecondReader[len(msgsForSecondReader)-1]))
-	require.NoError(t, firstReader.CommitMessages(ctx, msgsForSecondReader[0]))
-	resp, err := client.OffsetFetch(
-		ctx,
-		&OffsetFetchRequest{
-			GroupID: firstReader.config.GroupID,
-			Topics:  map[string][]int{firstReader.config.Topic: {0, 1}},
-		},
-	)
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	if topics, ok := resp.Topics[firstReader.config.Topic]; !ok {
-		require.True(t, ok, "Topic not found")
-	} else {
-		for _, topic := range topics {
-			if offset, ok := topicsToCommit[topic.Partition]; ok {
-				assert.Equal(t, offset+1, topic.CommittedOffset, "committed partition %d had committed offset %d instead of %d", topic.Partition, topic.CommittedOffset, offset)
-			} else {
-				assert.Equal(t, int64(-1), topic.CommittedOffset, "not-committed partition %d had committed offset %d instead of 0", topic.Partition, topic.CommittedOffset)
-			}
-		}
-	}
+	require.ErrorIs(t, errInvalidWritePartition, firstReader.CommitMessages(ctx, msgsForSecondReader[0]))
 }
 
 func TestOffsetStash(t *testing.T) {
@@ -1272,16 +1282,16 @@ func TestOffsetStash(t *testing.T) {
 			Given:    offsetStash{},
 			Messages: []Message{newMessage(0, 0)},
 			Expected: offsetStash{
-				topic: {0: 1},
+				topic: {0: {1, 1}},
 			},
 		},
 		"ignores earlier offsets": {
 			Given: offsetStash{
-				topic: {0: 2},
+				topic: {0: {2, 1}},
 			},
 			Messages: []Message{newMessage(0, 0)},
 			Expected: offsetStash{
-				topic: {0: 2},
+				topic: {0: {2, 1}},
 			},
 		},
 		"uses latest offset": {
@@ -1292,7 +1302,7 @@ func TestOffsetStash(t *testing.T) {
 				newMessage(0, 1),
 			},
 			Expected: offsetStash{
-				topic: {0: 4},
+				topic: {0: {4, 1}},
 			},
 		},
 		"uses latest offset, across multiple topics": {
@@ -1306,8 +1316,8 @@ func TestOffsetStash(t *testing.T) {
 			},
 			Expected: offsetStash{
 				topic: {
-					0: 4,
-					1: 7,
+					0: {4, 1},
+					1: {7, 1},
 				},
 			},
 		},
@@ -1359,10 +1369,11 @@ func TestCommitLoopImmediateFlushOnGenerationEnd(t *testing.T) {
 				return offsetCommitResponseV2{}, nil
 			},
 		},
-		done:     make(chan struct{}),
-		log:      func(func(Logger)) {},
-		logError: func(func(Logger)) {},
-		joined:   make(chan struct{}),
+		done:        make(chan struct{}),
+		log:         func(func(Logger)) {},
+		logError:    func(func(Logger)) {},
+		joined:      make(chan struct{}),
+		Assignments: map[string][]PartitionAssignment{"topic": {{0, 1}}},
 	}
 
 	// initialize commits so that the commitLoopImmediate select statement blocks
@@ -1396,7 +1407,7 @@ func TestCommitLoopImmediateFlushOnGenerationEnd(t *testing.T) {
 }
 
 func TestCommitOffsetsWithRetry(t *testing.T) {
-	offsets := offsetStash{"topic": {0: 0}}
+	offsets := offsetStash{"topic": {0: {0, 1}}}
 
 	tests := map[string]struct {
 		Fails       int
@@ -1430,9 +1441,10 @@ func TestCommitOffsetsWithRetry(t *testing.T) {
 						return offsetCommitResponseV2{}, nil
 					},
 				},
-				done:     make(chan struct{}),
-				log:      func(func(Logger)) {},
-				logError: func(func(Logger)) {},
+				done:        make(chan struct{}),
+				log:         func(func(Logger)) {},
+				logError:    func(func(Logger)) {},
+				Assignments: map[string][]PartitionAssignment{"topic": {{0, 1}}},
 			}
 
 			r := &Reader{stctx: context.Background()}
@@ -1636,7 +1648,7 @@ func TestConsumerGroupWithGroupTopicsSingle(t *testing.T) {
 	}
 }
 
-func TestConsumerGroupWithGroupTopicsMultple(t *testing.T) {
+func TestConsumerGroupWithGroupTopicsMultiple(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

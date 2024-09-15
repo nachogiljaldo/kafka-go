@@ -150,6 +150,13 @@ func (r *Reader) commitOffsetsWithRetry(gen *Generation, offsetStash offsetStash
 		backoffDelayMax = 5 * time.Second
 	)
 
+	messagesToSend := make(map[string]map[int]int64)
+	for topic, partitionsInfo := range offsetStash {
+		messagesToSend[topic] = make(map[int]int64)
+		for partition, commitInfo := range partitionsInfo {
+			messagesToSend[topic][partition] = commitInfo.offset
+		}
+	}
 	for attempt := 0; attempt < retries; attempt++ {
 		if attempt != 0 {
 			if !sleep(r.stctx, backoff(attempt, backoffDelayMin, backoffDelayMax)) {
@@ -157,7 +164,7 @@ func (r *Reader) commitOffsetsWithRetry(gen *Generation, offsetStash offsetStash
 			}
 		}
 
-		if err = gen.CommitOffsets(offsetStash); err == nil {
+		if err = gen.CommitOffsets(messagesToSend); err == nil {
 			return
 		}
 	}
@@ -165,20 +172,27 @@ func (r *Reader) commitOffsetsWithRetry(gen *Generation, offsetStash offsetStash
 	return // err will not be nil
 }
 
-// offsetStash holds offsets by topic => partition => offset.
-type offsetStash map[string]map[int]int64
+// offsetStash holds offsets by topic => partition => offsetEntry.
+type offsetEntry struct {
+	offset       int64
+	generationId int32
+}
+type offsetStash map[string]map[int]offsetEntry
 
 // merge updates the offsetStash with the offsets from the provided messages.
 func (o offsetStash) merge(commits []commit) {
 	for _, c := range commits {
 		offsetsByPartition, ok := o[c.topic]
 		if !ok {
-			offsetsByPartition = map[int]int64{}
+			offsetsByPartition = map[int]offsetEntry{}
 			o[c.topic] = offsetsByPartition
 		}
 
-		if offset, ok := offsetsByPartition[c.partition]; !ok || c.offset > offset {
-			offsetsByPartition[c.partition] = c.offset
+		if offset, ok := offsetsByPartition[c.partition]; !ok || c.offset > offset.offset {
+			offsetsByPartition[c.partition] = offsetEntry{
+				offset:       c.offset,
+				generationId: c.generationId,
+			}
 		}
 	}
 }

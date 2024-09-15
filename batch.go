@@ -232,6 +232,7 @@ func (batch *Batch) ReadMessage() (Message, error) {
 	msg.HighWaterMark = batch.highWaterMark
 	msg.Time = makeTime(timestamp)
 	msg.Headers = headers
+	msg.GenerationId = batch.conn.generationId
 
 	return msg, err
 }
