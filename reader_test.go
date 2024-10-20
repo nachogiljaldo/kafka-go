@@ -1250,7 +1250,7 @@ func testReaderConsumerGroupRebalanceDoesNotCommitNotOwnedPartitions(t *testing.
 	require.Eventually(t, func() bool {
 		resp, err := client.OffsetFetch(ctx, &OffsetFetchRequest{
 			GroupID: firstReader.config.GroupID,
-			Topics:  map[string][]int{firstReader.config.Topic: []int{partitionAssignedToSecondConsumer}},
+			Topics:  map[string][]int{firstReader.config.Topic: {partitionAssignedToSecondConsumer}},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, resp)
@@ -1270,7 +1270,7 @@ func testReaderConsumerGroupRebalanceDoesNotCommitNotOwnedPartitions(t *testing.
 	require.Eventually(t, func() bool {
 		resp, err := client.OffsetFetch(ctx, &OffsetFetchRequest{
 			GroupID: firstReader.config.GroupID,
-			Topics:  map[string][]int{firstReader.config.Topic: []int{partitionAssignedToSecondConsumer}},
+			Topics:  map[string][]int{firstReader.config.Topic: {partitionAssignedToSecondConsumer}},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, resp)
@@ -1303,7 +1303,7 @@ func testReaderConsumerGroupRebalanceDoesNotCommitNotOwnedPartitions(t *testing.
 	require.Eventually(t, func() bool {
 		resp, err := client.OffsetFetch(ctx, &OffsetFetchRequest{
 			GroupID: firstReader.config.GroupID,
-			Topics:  map[string][]int{firstReader.config.Topic: []int{partitionAssignedToFirstConsumer}},
+			Topics:  map[string][]int{firstReader.config.Topic: {partitionAssignedToFirstConsumer}},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, resp)
